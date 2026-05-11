@@ -18,6 +18,10 @@ def root():
 def echo(msg: Message):
     return {"echo": msg.text}
 
+@app.get("/goodbye")
+def goodbye():
+    return {"message": "Goodbye from CI/CD Pipeline!"}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
