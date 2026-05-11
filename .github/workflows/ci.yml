@@ -4,13 +4,19 @@ on:
   push:
     branches: [main, develop]
   pull_request:
-    branches: [main]
+    branches: [main, develop]
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  # ─────────────────────────────────────────────────────
+  # JOB 1: Tests
+  # Läuft bei jedem Push und jedem PR.
+  # Ist das Gatekeeper: schlägt dieser Job fehl, laufen
+  # die nachfolgenden Jobs nicht.
+  # ─────────────────────────────────────────────────────
   test:
     name: Run Tests
     runs-on: ubuntu-latest
@@ -34,11 +40,18 @@ jobs:
       - name: Run tests
         run: pytest --cov=. --cov-report=term
 
-  build-and-push:
-    name: Build & Push Docker Image
+  # ─────────────────────────────────────────────────────
+  # JOB 2: Image bauen und zu Test pushen
+  # Läuft NUR bei Push zu main (nicht bei PRs, nicht bei develop).
+  # Baut das Image einmal und pushed es mit zwei Tags:
+  #   :test         → zeigt "dieses Image ist im Test-Environment"
+  #   :sha-<hash>   → eindeutige ID für diesen Commit (für Traceability)
+  # ─────────────────────────────────────────────────────
+  push-to-test:
+    name: Build & Push to Test
     runs-on: ubuntu-latest
     needs: test
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     permissions:
       contents: read
@@ -58,23 +71,51 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata (tags, labels)
-        id: meta
-        uses: docker/metadata-action@v4
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix={{branch}}-
-
-      - name: Build and push Docker image
+      - name: Build and push image (test)
         uses: docker/build-push-action@v4
         with:
           context: .
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:test
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ─────────────────────────────────────────────────────
+  # JOB 3: Image zu Production promoten
+  # Braucht Job 2 als Voraussetzung (needs: push-to-test).
+  # "environment: production" erzeugt den Manual Approval
+  # Button in GitHub — der Job pausiert, bis jemand klickt.
+  # Baut das Image NICHT neu — nimmt das :sha-<hash> Image
+  # aus Job 2 und tagged es als :prod und :latest.
+  # Das ist Single Artifact Promotion: was getestet wurde,
+  # ist exakt was in Prod landet.
+  # ─────────────────────────────────────────────────────
+  push-to-production:
+    name: Promote to Production
+    runs-on: ubuntu-latest
+    needs: push-to-test
+    environment: production
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Log in to Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Promote image to production
+        run: |
+          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          docker tag  ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }} \
+                      ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:prod
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:prod
+          docker tag  ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }} \
+                      ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
