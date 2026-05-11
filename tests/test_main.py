@@ -17,3 +17,8 @@ def test_echo():
     response = client.post("/echo", json={"text": "hello"})
     assert response.status_code == 200
     assert response.json()["echo"] == "hello"
+    
+def test_goodbye():
+    response = client.get("/goodbye")
+    assert response.status_code == 200
+    assert "message" in response.json()
